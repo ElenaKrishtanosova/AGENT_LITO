@@ -1,0 +1,4 @@
+---
+alwaysApply: true
+---
+Before submitting changes to the AI agent's nodes or edges, you must generate a Mermaid graph using print(app.get_graph().draw_mermaid()). This ensures all architectural modifications are reviewed and approved before they are integrated into the main branch.

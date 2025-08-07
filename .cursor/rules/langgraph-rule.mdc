@@ -1,0 +1,298 @@
+---
+description: Use this rule when you're building or debugging a LangGraph workflow
+alwaysApply: false
+---
+# LangGraph Development Guidelines
+
+-----
+
+## Interrupting the Graph
+
+**How it works:** The `interrupt()` function stops the graph's execution by raising a `GraphInterrupt` exception. The graph saves its state to the checkpointer and waits to be resumed.
+
+**Important:** Do not wrap `interrupt()` in a `try/except` block. This will break the interruption mechanism. The exception must "bubble up" to LangGraph.
+
+**Resuming:** The graph is resumed using `Command(resume=value)`. When resumed, the node that was interrupted will run again from the beginning.
+
+```python
+async def my_node(state, config):
+    user_input = interrupt({
+        "message": ["Enter your response:"]
+    })
+
+    return Command(
+        goto="next_node",
+        update={"user_response": user_input}
+    )
+
+# Resuming the graph
+async with AsyncSqliteSaver.from_conn_string("checkpoints.sqlite") as checkpointer:
+    graph = workflow.compile(checkpointer=checkpointer)
+
+    # After an interruption
+    await graph.ainvoke(Command(resume="user response"), config)
+```
+
+-----
+
+## Command in the Graph
+
+**Purpose:** The `Command` class combines state updates and flow control into a single return from a node.
+
+**Parameters:**
+
+  * `goto=` - Specifies the next node or a list of nodes.
+  * `update=` - Updates the graph's state.
+
+**Rule:** Always use `Command(update=...)` instead of a plain `return {}`. State should only be updated via `Command`.
+
+```python
+async def router_node(state, config):
+    # Analyze the state
+    next_step = analyze_state(state)
+
+    return Command(
+        goto=next_step,
+        update={"current_step": next_step}
+    )
+```
+
+**Using `Send` for Parallel Tasks:**
+
+```python
+async def parallel_node(state, config):
+    parallel_sends = [
+        Send("answer_question", {"question": question})
+        for question in my_response.gap_questions
+    ]
+
+    return Command(
+        goto=parallel_sends,
+        update={"gap_questions": my_response.gap_questions}
+    )
+```
+
+-----
+
+## Graph Navigation: Static vs. Dynamic
+
+### Static Navigation with Conditional Edges
+
+**Principle:** All paths are determined during graph compilation. Routing functions **ONLY** make decisions; they **DO NOT** modify the state.
+
+**Rule:** In functions for `add_conditional_edges`, it is forbidden to modify the state. Only analyze and return the path.
+
+```python
+def route_decision(state: State) -> Literal["positive", "negative"]:
+    # CORRECT: only state analysis
+    if state["value"] > 0:
+        return "positive"
+    else:
+        return "negative"
+
+# DO NOT DO THIS: modifying state in the router
+def bad_router(state: State) -> str:
+    state["processed"] = True  # ❌ INCORRECT!
+    return "next_node"
+
+workflow.add_conditional_edges(
+    "process",
+    route_decision,
+    {"positive": "positive_node", "negative": "negative_node"}
+)
+```
+
+**Using `Send` for Parallelism:**
+
+```python
+def distribute_tasks(state: ParallelState):
+    return [Send("worker", {"task": task}) for task in state["tasks"]]
+
+workflow.add_conditional_edges("distribute", distribute_tasks)
+```
+
+### Dynamic Navigation with Command
+
+**Principle:** Nodes themselves determine the next step and can simultaneously modify the state.
+
+**Constraint:** When using `Command`, you cannot use `graph.update_state()` between nodes. All changes must be made via `update=` in the `Command`.
+
+```python
+def dynamic_router(state: State) -> Command[Literal["nodeA", "nodeB", END]]:
+    if state["value"] > 10:
+        return Command(
+            goto="nodeA",
+            update={"result": "Transition to node A", "processed": True}
+        )
+    elif state["value"] > 0:
+        return Command(goto="nodeB", update={"result": "Transition to node B"})
+    else:
+        return Command(goto=END, update={"result": "Ending"})
+```
+
+**`Command` + `Send` for Complex Scenarios:**
+
+```python
+def smart_distributor(state: ParallelState) -> Command:
+    if len(state["tasks"]) > 5:
+        sends = [Send("parallel_worker", {"task": task}) for task in state["tasks"]]
+        return Command(
+            goto=sends,
+            update={"status": "Parallel processing", "worker_count": len(sends)}
+        )
+    else:
+        return Command(
+            goto="sequential_worker",
+            update={"status": "Sequential processing", "current_task": 0}
+        )
+```
+
+**Choosing an Approach:**
+
+  * **Static Navigation:** Use for predictable paths and when you only need to analyze state.
+  * **Dynamic Navigation:** Use when you need to change the state while selecting the path.
+
+-----
+
+## Graph Invocation Methods
+
+### `invoke` / `ainvoke` - Get the Final Result
+
+Use when: You only need the final result without any intermediate updates.
+
+```python
+# Synchronous invocation
+result = graph.invoke({"value": 0})
+print(result)  # {'value': 1}
+
+# Asynchronous invocation
+async def run():
+    result = await graph.ainvoke({"value": 0})
+    return result
+```
+
+### `stream` / `astream` - Get Intermediate Updates
+
+Use when: You need to monitor the execution progress or receive results as they become available.
+
+**Stream Modes:**
+
+  * `stream_mode="updates"` - Only state changes after each node.
+  * `stream_mode="values"` - The full state after each node.
+
+<!-- end list -->
+
+```python
+# Synchronous stream
+for update in graph.stream({"count": 1}, stream_mode="updates"):
+    print(f"Node executed: {update}")
+    # {'double': {'count': 2}}
+    # {'add_five': {'count': 7}}
+
+# Asynchronous stream
+async def stream_process():
+    async for update in graph.astream({"msg": "Hello"}, stream_mode="values"):
+        print(f"State: {update}")
+        # {'msg': 'Hello!'}
+```
+
+**Rule:** Always use `astream` for long-running processes with interruptions, as it allows you to receive real-time updates.
+
+-----
+
+## SqliteSaver as a Checkpointer
+
+**Mandatory Rule:** Always open a new async session to work with the checkpointer.
+
+```python
+async def process_step(self, thread_id: str, query: str):
+    thread_config = {"configurable": {"thread_id": thread_id}}
+
+    # Always a new session
+    async with AsyncSqliteSaver.from_conn_string(
+        self.settings.llm.database_path
+    ) as checkpointer:
+        graph = self.workflow.compile(checkpointer=checkpointer)
+
+        async for event in graph.astream(
+            input_state,
+            thread_config,
+            stream_mode="updates"
+        ):
+            # Event processing
+            pass
+
+async def get_state(self, thread_id: str):
+    async with AsyncSqliteSaver.from_conn_string(
+        self.settings.llm.database_path
+    ) as checkpointer:
+        graph = self.workflow.compile(checkpointer=checkpointer)
+        return await graph.aget_state({"configurable": {"thread_id": thread_id}})
+```
+
+### MemorySaver for Tests and Short Sessions
+
+Use when: You are testing, prototyping, or running short sessions that don't require state to be saved between restarts.
+
+```python
+from langgraph.checkpoint.memory import MemorySaver
+
+checkpointer = MemorySaver()
+graph = workflow.compile(checkpointer=checkpointer)
+
+# State is lost when the process ends
+result = await graph.ainvoke(
+    {"value": 1},
+    {"configurable": {"thread_id": "test_session"}}
+)
+```
+
+### Managing Checkpointer Sessions
+
+**Rule:** Each operation with SQLite requires a separate context manager.
+
+```python
+# CORRECT: separate sessions for different operations
+async def save_and_load():
+    # Saving
+    async with AsyncSqliteSaver.from_conn_string("db.sqlite") as saver:
+        await saver.aput(config, checkpoint_data, {}, {})
+
+    # Loading in a separate session
+    async with AsyncSqliteSaver.from_conn_string("db.sqlite") as saver:
+        loaded = await saver.aget(config)
+        return loaded
+
+# INCORRECT: reusing a session
+async def bad_usage():
+    saver = AsyncSqliteSaver.from_conn_string("db.sqlite")
+    # ❌ No context manager, resource leak
+    await saver.aput(config, data, {}, {})
+```
+
+### Graph Invocation:
+
+```python
+# New execution
+input_state = GeneralState(video_url=query)
+
+# Resuming after an interrupt
+input_state = Command(resume=user_response)
+
+# Execution
+async for event in graph.astream(input_state, thread_config):
+    # Process results
+    pass
+```
+
+-----
+
+## Key Principles:
+
+  * `interrupt` stops the graph with an exception—do not catch it.
+  * `Command` replaces all transitions between nodes and is mandatory for state updates.
+  * **Static navigation:** Routing functions do **not** modify the state.
+  * **Dynamic navigation:** Do **not** use `graph.update_state()` between nodes.
+  * `SqliteSaver` requires a new async session for each operation.
+  * Use `astream` to get intermediate results.
+  * `MemorySaver` is for tests, `SqliteSaver` for production.
