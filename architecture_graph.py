@@ -12,28 +12,38 @@ graph TD
     
     B --> C{Query Type?}
     
-    C -->|DATABASE_SEARCH| D{Needs Location?}
-    C -->|WEB_SEARCH| D
-    C -->|URL_SEARCH| D
-    C -->|UNCLEAR_QUERY| E[handle_unclear_node]
+    C -->|DATABASE_SEARCH| D{Location needed?}
+    C -->|WEB_SEARCH| E{Location needed?}
+    C -->|URL_SEARCH| F{Location needed?}
+    C -->|UNCLEAR_QUERY| G[handle_unclear_node]
     
-    D -->|Yes & No Location| F[check_location_node]
-    D -->|No or Has Location| G{Search Type?}
+    D -->|Yes| H[check_location_node]
+    D -->|No| I[search_database_node]
+    E -->|Yes| H
+    E -->|No| J[search_web_node]
+    F -->|Yes| H
+    F -->|No| K[search_url_node]
     
-    F --> B
-    F --> H[location_response_node]
+    H --> L{Location Available?}
+    L -->|No| M[INTERRUPT: Request Location]
+    L -->|Yes| N{Direct to Search Type}
     
-    G -->|DATABASE_SEARCH| I[search_database_node]
-    G -->|WEB_SEARCH| J[search_web_node]
-    G -->|URL_SEARCH| K[search_url_node]
+    N -->|DATABASE_SEARCH| I
+    N -->|WEB_SEARCH| J
+    N -->|URL_SEARCH| K
     
-    H --> L[generate_response_node]
-    I --> L
-    J --> L
-    K --> L
-    E --> L
+    G --> O{Attempts < 2?}
+    O -->|Yes| P[Request clarification]
+    O -->|No| Q[End conversation]
     
-    L --> M[Final Response]
+    P --> B
+    Q --> R[generate_response_node]
+    
+    I --> R
+    J --> R
+    K --> R
+    
+    R --> S[Final Response]
     
     %% Стили узлов
     classDef startNode fill:#e1f5fe
@@ -42,13 +52,15 @@ graph TD
     classDef searchNode fill:#e8f5e8
     classDef responseNode fill:#fce4ec
     classDef unclearNode fill:#ffebee
+    classDef interruptNode fill:#ffcdd2
     
-    class A,M startNode
+    class A,S startNode
     class B,C classifyNode
-    class F,H locationNode
+    class H,L,N locationNode
     class I,J,K searchNode
-    class L responseNode
-    class E unclearNode
+    class R responseNode
+    class G,O unclearNode
+    class M interruptNode
     """
 
 def get_architecture_description():
