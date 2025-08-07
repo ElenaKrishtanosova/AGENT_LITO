@@ -45,7 +45,7 @@ User Input → classify_query → check_location → location_response → searc
 
 1. **Clone the repository**
 ```bash
-git clone https://github.com/yourusername/AGENT_LITO.git
+git clone https://github.com/ElenaKrishtanosova/AGENT_LITO.git
 cd AGENT_LITO
 ```
 
