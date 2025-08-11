@@ -1,49 +1,49 @@
 """
-Основной класс LangGraph чат-бота для поиска ресурсов
+Main LangGraph chatbot class for resource discovery
 """
 
 import os
 import asyncio
 from typing import Literal
 
-# LangGraph и LangChain imports
+# LangGraph and LangChain imports
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 from langchain_openai import ChatOpenAI
 
-# Внутренние модули
+# Internal modules
 from .data_types import ChatState, QueryType, ResourceItem, LocationInfo
 from .classification import QueryClassifier
 from .search import DatabaseSearcher, WebSearcher, URLSearcher
 
 
 class ResourceChatBot:
-    """Основной класс чат-бота для поиска ресурсов для семей с приемными детьми"""
+    """Primary chatbot class for finding resources for foster families"""
     
     def __init__(self):
-        # Инициализация LLM
+        # Initialize LLM
         self.llm = ChatOpenAI(
             model="gpt-4o-mini",
             openai_api_key=os.getenv("OPENAI_API_KEY"),
             temperature=0.1
         )
         
-        # Инициализация компонентов
+        # Initialize components
         self.classifier = QueryClassifier(self.llm)
         self.db_searcher = DatabaseSearcher(os.getenv("CONN_STRING"))
         self.web_searcher = WebSearcher(os.getenv("TAVILY_API_KEY"))
         self.url_searcher = URLSearcher()
         
-        # Настройка графа
+        # Graph setup
         self.workflow = self._build_graph()
         self.app = self.workflow.compile(checkpointer=MemorySaver())
     
     def _build_graph(self) -> StateGraph:
-        """Построение графа состояний с динамической навигацией"""
+        """Build state graph with dynamic navigation"""
         workflow = StateGraph(ChatState)
         
-        # Добавляем узлы
+        # Add nodes
         workflow.add_node("classify_query", self._classify_query_node)
         workflow.add_node("check_location", self._check_location_node)
         workflow.add_node("location_response", self._location_response_node)
@@ -53,10 +53,10 @@ class ResourceChatBot:
         workflow.add_node("handle_unclear", self._handle_unclear_node)
         workflow.add_node("generate_response", self._generate_response_node)
         
-        # Стартовый узел
+        # Start node
         workflow.add_edge(START, "classify_query")
         
-        # Условные переходы из classify_query
+        # Conditional edges from classify_query
         workflow.add_conditional_edges(
             "classify_query",
             lambda state: getattr(state, 'next_node', 'generate_response'),
@@ -70,7 +70,7 @@ class ResourceChatBot:
             }
         )
         
-        # Условные переходы из check_location
+        # Conditional edges from check_location
         workflow.add_conditional_edges(
             "check_location",
             lambda state: getattr(state, 'next_node', 'generate_response'),
@@ -84,38 +84,38 @@ class ResourceChatBot:
             }
         )
         
-        # Прямые переходы к generate_response
+        # Direct edges to generate_response
         workflow.add_edge("search_database", "generate_response")
         workflow.add_edge("search_web", "generate_response")
         workflow.add_edge("search_url", "generate_response")
         workflow.add_edge("handle_unclear", "generate_response")
         workflow.add_edge("location_response", "generate_response")
         
-        # Финальный переход
+        # Final edge
         workflow.add_edge("generate_response", END)
         
         return workflow
     
-    # === УЗЛЫ ГРАФА ===
+    # === GRAPH NODES ===
     
     async def _classify_query_node(self, state: ChatState) -> Command:
-        """Узел классификации пользовательского запроса"""
+        """Node for classifying user query"""
         print(f"🔍 Classifying query: {state.user_input}")
         
-        # LLM классификация
+        # LLM classification
         classification = await self.classifier.classify(state.user_input)
         
-        # Определяем локацию из классификации или используем существующую
-        # Но только если это не новый запрос (не из check_location)
+        # Determine location from classification or use existing one
+        # But only if it's not a new query (not from check_location)
         user_location = None
         if hasattr(state, 'from_location_check') and state.from_location_check:
-            # Если мы пришли из check_location, используем сохраненную локацию
+            # If we came from check_location, use the saved location
             user_location = state.user_location
         else:
-            # Для нового запроса используем локацию из классификации
+            # For a new query, use the location from classification
             user_location = classification.location_info
         
-        # Проверяем, нужна ли локация и есть ли она
+        # Check if location is needed and if it exists
         needs_location_check = classification.location_needed and (
             user_location is None or 
             (hasattr(user_location, 'city') and not user_location.city) or
@@ -126,7 +126,7 @@ class ResourceChatBot:
         print(f"   Current location: {user_location}")
         print(f"   Needs location check: {needs_location_check}")
         
-        # Динамическая навигация на основе типа запроса
+        # Dynamic navigation based on query type
         if classification.query_type == QueryType.DATABASE_SEARCH:
             if needs_location_check:
                 print("   → Going to check_location (needs location)")
@@ -159,16 +159,16 @@ class ResourceChatBot:
                 "search_keywords": classification.extracted_keywords,
                 "needs_location": classification.location_needed,
                 "user_location": user_location,
-                "from_location_check": False,  # Сбрасываем флаг
+                "from_location_check": False,  # Reset flag
                 "next_node": next_node
             }
         )
     
     async def _check_location_node(self, state: ChatState) -> Command:
-        """Узел проверки и запроса локации"""
+        """Node for checking and requesting location"""
         print("📍 Checking location requirements")
         
-        # Проверяем, есть ли локация и нужна ли она
+        # Check if location exists and if it's needed
         has_location = (
             state.user_location is not None and
             hasattr(state.user_location, 'city') and 
@@ -178,13 +178,13 @@ class ResourceChatBot:
         )
         
         if not has_location and state.needs_location:
-            # Реальный interrupt для запроса локации у пользователя
+            # Real interrupt for requesting location from user
             print("   🔄 INTERRUPT: Requesting location from user")
             
-            # Возвращаем сообщение для запроса локации
+            # Return message for location request
             return Command(
                 update={
-                    "interrupt_message": "Для поиска ресурсов мне нужна ваша локация. Пожалуйста, укажите город и штат (например: Austin, Texas):",
+                    "interrupt_message": "For resource discovery, I need your location. Please specify city and state (e.g., Austin, Texas):",
                     "waiting_for_location": True,
                     "original_query": state.user_input,
                     "search_keywords": state.search_keywords,
@@ -193,7 +193,7 @@ class ResourceChatBot:
                 }
             )
         
-        # Локация уже есть или не нужна - идем к соответствующему поиску
+        # Location already exists or not needed - proceed to relevant search
         if state.query_type == QueryType.DATABASE_SEARCH:
             next_node = "search_database"
         elif state.query_type == QueryType.WEB_SEARCH:
@@ -208,13 +208,13 @@ class ResourceChatBot:
         )
     
     async def _location_response_node(self, state: ChatState) -> Command:
-        """Узел обработки ответа с локацией от пользователя"""
+        """Node for processing location response from user"""
         print("📍 Processing location response from user")
         
-        # Парсим локацию из ответа пользователя
+        # Parse location from user response
         location_text = state.user_input.strip()
         
-        # Простой парсинг локации (можно улучшить с помощью LLM)
+        # Simple location parsing (can be improved with LLM)
         if "," in location_text:
             parts = [part.strip() for part in location_text.split(",")]
             if len(parts) >= 2:
@@ -226,7 +226,7 @@ class ResourceChatBot:
                 state = parts[1]
                 county = None
         else:
-            # Если нет запятой, считаем весь текст городом
+            # If no comma, consider the entire text as the city
             city = location_text
             state = None
             county = None
@@ -239,7 +239,7 @@ class ResourceChatBot:
         
         print(f"   Parsed location: {location_info}")
         
-        # Возвращаемся к поиску с полученной локацией
+        # Return to search with obtained location
         if state.query_type == QueryType.DATABASE_SEARCH:
             next_node = "search_database"
         elif state.query_type == QueryType.WEB_SEARCH:
@@ -257,7 +257,7 @@ class ResourceChatBot:
         )
     
     async def _search_database_node(self, state: ChatState) -> Command:
-        """Узел поиска в базе данных Azure SQL"""
+        """Node for searching in Azure SQL database"""
         print(f"   Searching for keywords: {state.search_keywords}")
         resources = await self.db_searcher.search(state.search_keywords)
         print(f"   Found {len(resources)} resources from database")
@@ -265,7 +265,7 @@ class ResourceChatBot:
         if resources:
             print(f"   First resource title: {resources[0].title}")
         
-        # Обновляем состояние с найденными ресурсами
+        # Update state with found resources
         return Command(
             update={
                 "found_resources": resources,
@@ -276,7 +276,7 @@ class ResourceChatBot:
         )
     
     async def _search_web_node(self, state: ChatState) -> Command:
-        """Узел поиска в интернете"""
+        """Node for searching the internet"""
         location_str = self._format_location(state.user_location) if state.user_location else None
         resources = await self.web_searcher.search(state.search_keywords, location_str)
         
@@ -288,7 +288,7 @@ class ResourceChatBot:
         )
     
     async def _search_url_node(self, state: ChatState) -> Command:
-        """Узел поиска по конкретной ссылке"""
+        """Node for searching a specific URL"""
         resources = await self.url_searcher.search(state.search_url, state.search_keywords)
         
         return Command(
@@ -299,13 +299,13 @@ class ResourceChatBot:
         )
     
     async def _handle_unclear_node(self, state: ChatState) -> Command:
-        """Узел обработки неясных запросов"""
+        """Node for handling unclear queries"""
         print("❓ Handling unclear query")
         
         new_attempts = state.clarification_attempts + 1
         
         if new_attempts >= 2:
-            # Вежливо завершаем беседу
+            # Politely end the conversation
             return Command(
                 update={
                     "is_conversation_complete": True,
@@ -315,8 +315,8 @@ class ResourceChatBot:
                 }
             )
         
-        # TODO: Здесь должен быть interrupt для запроса уточнения
-        # Пока мокируем
+        # TODO: Here should be an interrupt for requesting clarification
+        # For now, we mock
         clarification = "I need food assistance for my foster children in Austin, Texas"
         
         return Command(
@@ -328,7 +328,7 @@ class ResourceChatBot:
         )
     
     async def _generate_response_node(self, state: ChatState) -> Command:
-        """Узел генерации финального ответа"""
+        """Node for generating the final response"""
         print("📝 Generating final response")
         print(f"   Found resources: {len(state.found_resources) if state.found_resources else 0}")
         print(f"   Query type: {state.query_type}")
@@ -340,7 +340,7 @@ class ResourceChatBot:
         if state.is_conversation_complete:
             response = state.final_response
         else:
-            # Генерируем ответ на основе найденных ресурсов
+            # Generate response based on found resources
             response = self._format_response(state.found_resources, state.query_type, state.user_location)
         
         print(f"   Generated response length: {len(response)}")
@@ -353,10 +353,10 @@ class ResourceChatBot:
             }
         )
     
-    # === ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ===
+    # === HELPER METHODS ===
     
     def _format_location(self, location: LocationInfo) -> str:
-        """Форматирует LocationInfo в строку"""
+        """Formats LocationInfo to string"""
         parts = []
         if location.city:
             parts.append(location.city)
@@ -367,7 +367,7 @@ class ResourceChatBot:
         return ", ".join(parts)
     
     def _format_response(self, resources: list[ResourceItem], query_type: QueryType, location: LocationInfo = None) -> str:
-        """Форматирует ответ на основе найденных ресурсов"""
+        """Formats response based on found resources"""
         if not resources:
             location_str = f" in {self._format_location(location)}" if location else ""
             return f"I couldn't find any free resources for foster families{location_str}. Please try a different search or contact your local foster care agency for assistance."
@@ -389,27 +389,27 @@ class ResourceChatBot:
         
         return response
     
-    # === ПУБЛИЧНЫЕ МЕТОДЫ ===
+    # === PUBLIC METHODS ===
     
     async def process_user_query(self, user_input: str) -> str:
         """
-        Основной метод обработки пользовательского запроса
+        Main method for processing user query
         
         Args:
-            user_input: Запрос пользователя
+            user_input: User query
             
         Returns:
-            Финальный ответ системы или сообщение для interrupt
+            Final system response or interrupt message
         """
         config = {"configurable": {"thread_id": "user_session"}}
         
-        # Запускаем граф
+        # Run graph
         result = await self.app.ainvoke(
             {"user_input": user_input},
             config=config
         )
         
-        # Проверяем, есть ли interrupt
+        # Check for interrupt
         if result.get("interrupt_message"):
             return result["interrupt_message"]
         
@@ -417,23 +417,23 @@ class ResourceChatBot:
     
     async def process_user_query_with_resources(self, user_input: str) -> dict:
         """
-        Обрабатывает пользовательский запрос и возвращает ответ с ресурсами
+        Processes user query and returns response with resources
         
         Args:
-            user_input: Запрос пользователя
+            user_input: User query
             
         Returns:
-            Словарь с ответом и найденными ресурсами
+            Dictionary with response and found resources
         """
         config = {"configurable": {"thread_id": "user_session"}}
         
-        # Запускаем граф
+        # Run graph
         result = await self.app.ainvoke(
             {"user_input": user_input},
             config=config
         )
         
-        # Проверяем, есть ли interrupt
+        # Check for interrupt
         if result.get("interrupt_message"):
             return {
                 "response": result["interrupt_message"],
@@ -441,7 +441,7 @@ class ResourceChatBot:
                 "resources": []
             }
         
-        # Преобразуем ресурсы в формат для API
+        # Convert resources to API format
         resources = []
         if result.get("found_resources"):
             for resource in result["found_resources"]:
@@ -463,5 +463,5 @@ class ResourceChatBot:
         }
     
     def get_mermaid_graph(self) -> str:
-        """Возвращает Mermaid представление графа"""
+        """Returns Mermaid representation of the graph"""
         return self.app.get_graph().draw_mermaid() 

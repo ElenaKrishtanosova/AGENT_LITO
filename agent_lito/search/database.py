@@ -1,5 +1,5 @@
 """
-Поиск в Azure SQL базе данных с векторной поддержкой
+Azure SQL database search with vector support
 """
 
 import asyncio
@@ -13,44 +13,44 @@ from ..data_types import ResourceItem
 
 
 class DatabaseSearcher:
-    """Поисковик в Azure SQL базе данных для ресурсов семей с приемными детьми"""
+    """Azure SQL database searcher for foster family resources"""
     
     def __init__(self, connection_string: str):
         self.connection_string = connection_string
         self.openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         
-        # Константы для поиска
+        # Search constants
         self.TOP_N = 10
         self.MIN_COSINE = 0.3  # Lowered from 0.7 to get more results
-        # Гибридная взвешенная сумма: alpha*vector + (1-alpha)*keyword
+        # Hybrid weighted sum: alpha*vector + (1-alpha)*keyword
         self.HYBRID_ALPHA = 0.65
     
     async def search(self, keywords: List[str]) -> List[ResourceItem]:
         """
-        Выполняет гибридный поиск (векторный + ключевые слова) в Azure SQL
+        Execute hybrid search (vector + keyword) in Azure SQL
         """
         print("🗄️ Searching database for foster family resources (hybrid)")
         
         try:
-            # Объединяем ключевые слова в поисковый запрос
+            # Combine keywords into the search query
             search_query = " ".join(keywords)
             print(f"   Search query: {search_query}")
             
-            # Генерируем эмбеддинги
+            # Generate embeddings
             embedding = await self._generate_embeddings(search_query)
             if not embedding:
                 print("   Error: Could not generate embeddings")
                 return []
             
-            # Выполняем гибридный поиск
+            # Execute hybrid search
             results = await self._execute_hybrid_search(search_query, embedding)
             
-            # Если гибрид не дал результатов, fallback на чистый вектор
+            # If hybrid returns no results, fallback to vector-only
             if not results:
                 print("   No hybrid results, falling back to vector-only...")
                 results = await self._execute_vector_search(search_query, embedding)
             
-            # Преобразуем результаты в ResourceItem
+            # Convert results to ResourceItem
             resources = []
             for result in results:
                 category = result.get('service_category', 'General')
@@ -82,13 +82,13 @@ class DatabaseSearcher:
     
     async def _generate_embeddings(self, text: str) -> Optional[List[float]]:
         """
-        Генерирует эмбеддинги для текста используя OpenAI API
+        Generates embeddings for text using OpenAI API
         
         Args:
-            text: Текст для векторизации
+            text: Text to vectorize
             
         Returns:
-            Список float значений эмбеддинга или None при ошибке
+            List of float values for the embedding or None on error
         """
         try:
             response = self.openai_client.embeddings.create(
@@ -96,10 +96,10 @@ class DatabaseSearcher:
                 model="text-embedding-3-small"
             )
             
-            # Получаем эмбеддинг из ответа
+            # Get the embedding from the response
             embedding = response.data[0].embedding
             
-            # Преобразуем в строку для SQL
+            # Convert to string for SQL
             embedding_str = json.dumps(embedding)
             
             print(f"   Generated embedding with {len(embedding)} dimensions")
@@ -111,24 +111,24 @@ class DatabaseSearcher:
     
     async def _execute_vector_search(self, query: str, embedding: str) -> List[dict]:
         """
-        Выполняет векторный поиск в Azure SQL
+        Executes vector search in Azure SQL
         
         Args:
-            query: Оригинальный текстовый запрос
-            embedding: JSON строка с эмбеддингом
+            query: Original text query
+            embedding: JSON string with embedding
             
         Returns:
-            Список результатов поиска
+            List of search results
         """
         try:
-            # Создаем SQL запрос с векторным поиском
+            # Create SQL query with vector search
             sql_query = self._build_vector_query(embedding)
             print(f"   SQL Query: {sql_query[:200]}...")
             
-            # Выполняем запрос
+            # Execute query
             results = await self._execute_query(sql_query)
             
-            # Если нет результатов, попробуем без фильтра по similarity
+            # If no results, try without similarity filter
             if not results:
                 print("   No results with similarity filter, trying without filter...")
                 sql_query_no_filter = f"""
@@ -159,13 +159,13 @@ class DatabaseSearcher:
     
     def _build_vector_query(self, embedding: str) -> str:
         """
-        Создает SQL-запрос с векторным поиском для Azure SQL
+        Creates SQL query with vector search for Azure SQL
         
         Args:
-            embedding: JSON строка с эмбеддингом
+            embedding: JSON string with embedding
             
         Returns:
-            SQL запрос с VECTOR_DISTANCE
+            SQL query with VECTOR_DISTANCE
         """
         return f"""
         DECLARE @v1 VECTOR(1536) = '{embedding}';
@@ -188,16 +188,16 @@ class DatabaseSearcher:
     
     async def _execute_query(self, sql_query: str) -> List[dict]:
         """
-        Выполняет SQL запрос к Azure SQL
+        Executes SQL query to Azure SQL
         
         Args:
-            sql_query: SQL запрос для выполнения
+            sql_query: SQL query to execute
             
         Returns:
-            Список результатов в виде словарей
+            List of results as dictionaries
         """
         try:
-            # Используем asyncio для неблокирующего выполнения
+            # Use asyncio for non-blocking execution
             loop = asyncio.get_event_loop()
             
             def execute_sync():
@@ -205,13 +205,13 @@ class DatabaseSearcher:
                     cursor = conn.cursor()
                     cursor.execute(sql_query)
                     
-                    # Получаем названия колонок
+                    # Get column names
                     columns = [column[0] for column in cursor.description]
                     
-                    # Получаем результаты
+                    # Get results
                     rows = cursor.fetchall()
                     
-                    # Преобразуем в список словарей
+                    # Convert to list of dictionaries
                     results = []
                     for row in rows:
                         row_dict = dict(zip(columns, row))
@@ -219,7 +219,7 @@ class DatabaseSearcher:
                     
                     return results
             
-            # Выполняем в отдельном потоке
+            # Execute in a separate thread
             results = await loop.run_in_executor(None, execute_sync)
             
             print(f"   Executed query, got {len(results)} results")
@@ -231,18 +231,18 @@ class DatabaseSearcher:
 
     def _build_hybrid_query(self, embedding: str, keywords_text: str) -> str:
         """
-        Строит гибридный запрос, комбинируя векторную близость и полнотекстовый скор.
-        Требует настроенного FULLTEXT INDEX по текстовым колонкам (например, description, resource_name).
+        Builds a hybrid query, combining vector similarity and full-text score.
+        Requires a configured FULLTEXT INDEX on text columns (e.g., description, resource_name).
         """
-        # Пример на основе подходов из Azure SQL hybrid search:
-        # Итоговый скор: alpha*vector + (1-alpha)*keyword_score
-        # Для keyword_score используем FREETEXTTABLE/CONTAINSTABLE (нормализуем ранг)
+        # Example based on Azure SQL hybrid search approaches:
+        # Final score: alpha*vector + (1-alpha)*keyword_score
+        # For keyword_score, we use FREETEXTTABLE/CONTAINSTABLE (normalize rank)
         alpha = self.HYBRID_ALPHA
         return f"""
         DECLARE @v1 VECTOR(1536) = '{embedding}';
         DECLARE @alpha FLOAT = {alpha};
         
-        -- Полнотекстовый скор через FREETEXTTABLE по нескольким колонкам
+        -- Full-text score via FREETEXTTABLE on multiple columns
         WITH kw AS (
             SELECT k.[KEY] as RMS_id, CAST(k.RANK AS FLOAT) / 1000.0 AS kw_score
             FROM FREETEXTTABLE(rms.rms_table_view, (description, resource_name, service_category, profile_category), '{keywords_text}') k
@@ -266,7 +266,7 @@ class DatabaseSearcher:
 
     async def _execute_hybrid_search(self, keywords_text: str, embedding: str) -> List[dict]:
         """
-        Выполняет гибридный (vector + keyword) запрос
+        Executes a hybrid (vector + keyword) query
         """
         try:
             sql_query = self._build_hybrid_query(embedding, keywords_text.replace("'", "''"))
