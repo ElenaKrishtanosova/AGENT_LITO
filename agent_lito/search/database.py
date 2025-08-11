@@ -22,18 +22,14 @@ class DatabaseSearcher:
         # Константы для поиска
         self.TOP_N = 10
         self.MIN_COSINE = 0.3  # Lowered from 0.7 to get more results
+        # Гибридная взвешенная сумма: alpha*vector + (1-alpha)*keyword
+        self.HYBRID_ALPHA = 0.65
     
     async def search(self, keywords: List[str]) -> List[ResourceItem]:
         """
-        Выполняет векторный поиск в Azure SQL с векторной поддержкой
-        
-        Args:
-            keywords: Список ключевых слов для поиска
-            
-        Returns:
-            Список найденных ресурсов для семей с приемными детьми
+        Выполняет гибридный поиск (векторный + ключевые слова) в Azure SQL
         """
-        print("🗄️ Searching database for foster family resources")
+        print("🗄️ Searching database for foster family resources (hybrid)")
         
         try:
             # Объединяем ключевые слова в поисковый запрос
@@ -46,34 +42,31 @@ class DatabaseSearcher:
                 print("   Error: Could not generate embeddings")
                 return []
             
-            # Выполняем векторный поиск
-            results = await self._execute_vector_search(search_query, embedding)
+            # Выполняем гибридный поиск
+            results = await self._execute_hybrid_search(search_query, embedding)
+            
+            # Если гибрид не дал результатов, fallback на чистый вектор
+            if not results:
+                print("   No hybrid results, falling back to vector-only...")
+                results = await self._execute_vector_search(search_query, embedding)
             
             # Преобразуем результаты в ResourceItem
             resources = []
             for result in results:
-                # Определяем категорию на основе service_category
                 category = result.get('service_category', 'General')
                 if category and ',' in category:
-                    category = category.split(',')[0].strip()  # Берем первую категорию
-                
-                # Определяем локацию из area_served
+                    category = category.split(',')[0].strip()
                 location = result.get('area_served', 'Location not specified')
                 if location and location.startswith('COUNTY '):
                     location = location.replace('COUNTY ', '')
-                
-                # Определяем URL (приоритет resource_url, затем org_url)
                 url = result.get('resource_url') or result.get('org_url')
-                
-                # Создаем контактную информацию из org_name
                 contact_info = result.get('org_name')
-                
                 resource = ResourceItem(
                     title=result.get('resource_name', 'Unknown Resource'),
                     description=result.get('description', 'No description available'),
                     category=category,
                     source="database",
-                    relevance_score=result.get('similarity_score', 0.0),
+                    relevance_score=result.get('hybrid_score') or result.get('similarity_score', 0.0),
                     location=location,
                     url=url,
                     contact_info=contact_info
@@ -234,4 +227,52 @@ class DatabaseSearcher:
             
         except Exception as e:
             print(f"   Error executing query: {e}")
+            return [] 
+
+    def _build_hybrid_query(self, embedding: str, keywords_text: str) -> str:
+        """
+        Строит гибридный запрос, комбинируя векторную близость и полнотекстовый скор.
+        Требует настроенного FULLTEXT INDEX по текстовым колонкам (например, description, resource_name).
+        """
+        # Пример на основе подходов из Azure SQL hybrid search:
+        # Итоговый скор: alpha*vector + (1-alpha)*keyword_score
+        # Для keyword_score используем FREETEXTTABLE/CONTAINSTABLE (нормализуем ранг)
+        alpha = self.HYBRID_ALPHA
+        return f"""
+        DECLARE @v1 VECTOR(1536) = '{embedding}';
+        DECLARE @alpha FLOAT = {alpha};
+        
+        -- Полнотекстовый скор через FREETEXTTABLE по нескольким колонкам
+        WITH kw AS (
+            SELECT k.[KEY] as RMS_id, CAST(k.RANK AS FLOAT) / 1000.0 AS kw_score
+            FROM FREETEXTTABLE(rms.rms_table_view, (description, resource_name, service_category, profile_category), '{keywords_text}') k
+        )
+        SELECT TOP {self.TOP_N}
+            t.RMS_id,
+            t.description,
+            t.resource_name,
+            t.org_name,
+            t.org_url,
+            t.resource_url,
+            t.area_served,
+            t.service_category,
+            t.profile_category,
+            (1 - VECTOR_DISTANCE('cosine', @v1, t.VectorBinary)) AS vector_score,
+            ISNULL(kw.kw_score, 0.0) AS kw_score,
+            (@alpha * (1 - VECTOR_DISTANCE('cosine', @v1, t.VectorBinary)) + (1-@alpha) * ISNULL(kw.kw_score, 0.0)) AS hybrid_score
+        FROM rms.rms_table_view t
+        LEFT JOIN kw ON kw.RMS_id = t.RMS_id
+        ORDER BY hybrid_score DESC;"""
+
+    async def _execute_hybrid_search(self, keywords_text: str, embedding: str) -> List[dict]:
+        """
+        Выполняет гибридный (vector + keyword) запрос
+        """
+        try:
+            sql_query = self._build_hybrid_query(embedding, keywords_text.replace("'", "''"))
+            print(f"   HYBRID SQL: {sql_query[:200]}...")
+            results = await self._execute_query(sql_query)
+            return results
+        except Exception as e:
+            print(f"   Error executing hybrid search: {e}")
             return [] 
